@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use gloo::console::{self, __macro::JsValue};
+use gloo::timers::callback::Interval;
 use gloo_net::http::Request;
 use gloo_net::websocket::{futures::*, Message};
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,7 @@ impl From<HeatEvent> for JsValue {
 
 #[derive(Deserialize, Serialize, Debug, Default, Clone)]
 pub struct User {
+    id: String,
     display_name: String,
     profile_img: String,
     position: (f32, f32),
@@ -63,11 +65,29 @@ impl Component for App {
     fn create(ctx: &Context<Self>) -> Self {
         //sadmadladsalman: 143306668
         //soulsev: 50475354
-        let mut ws = WebSocket::open("wss://heat-api.j38.net/channel/143306668").expect("ws");
+        let (sender, mut receiver) = WebSocket::open("wss://heat-api.j38.net/channel/143306668")
+            .expect("ws")
+            .split();
+
+        let sender = Arc::new(RwLock::new(sender));
+
+        Interval::new(5000, move || {
+            let sender = sender.clone();
+            spawn_local(async move {
+                console::log!("ping");
+                sender
+                    .write()
+                    .expect("sender")
+                    .send(Message::Bytes(vec![]))
+                    .await
+                    .expect("Ping");
+            });
+        })
+        .forget();
 
         let link = ctx.link().clone();
         spawn_local(async move {
-            while let Some(msg) = ws.next().await {
+            while let Some(msg) = receiver.next().await {
                 match msg {
                     Ok(Message::Text(msg)) => {
                         let event = serde_json::from_str::<HeatEvent>(&msg).expect("Heat event");
@@ -118,7 +138,7 @@ impl Component for App {
                     .users
                     .write()
                     .expect("write user")
-                    .insert(user.display_name.clone(), user)
+                    .insert(user.id.clone(), user)
                 {
                     console::log!("new user");
                 }
@@ -134,7 +154,6 @@ impl Component for App {
     }
 
     fn view(&self, _ctx: &Context<Self>) -> Html {
-        //
         html! {
             <>
                 {
@@ -142,8 +161,8 @@ impl Component for App {
                         let styles = format!(
                                 "
                                     position: absolute;
-                                    top: {}%;
-                                    left: {}%;
+                                    top: calc({}% - 30px);
+                                    left: calc({}% - 30px);
                                 ",
                                 user.position.1, user.position.0
                             );
@@ -164,11 +183,14 @@ async fn get_user_details(users: Users, x: f32, y: f32, id: String) -> Msg {
         console::log!("Cached");
         console::log!(&user.display_name);
         return Msg::ShowPfp(User {
+            id,
             display_name: user.display_name.clone(),
             profile_img: user.profile_img.clone(),
             position: (x * 100., y * 100.),
         });
     }
+
+    console::log!("Requesting user info");
 
     let res = Request::get(&format!("https://heat-api.j38.net/user/{}", id))
         .send()
@@ -177,12 +199,11 @@ async fn get_user_details(users: Users, x: f32, y: f32, id: String) -> Msg {
     if let Ok(res) = res {
         let res = res.json::<Value>().await.expect("json");
 
-        console::log!("Requesting user info");
-
         let display_name = res["display_name"].as_str().expect("str").to_string();
         let profile_img = res["profile_image_url"].as_str().expect("str").to_string();
 
         return Msg::ShowPfp(User {
+            id,
             display_name,
             profile_img,
             position: (x * 100., y * 100.),
